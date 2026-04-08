@@ -19,14 +19,14 @@ tmuxinator configs          workmux per-project config
         └──────────┬────────────────────┘
                    ▼
            workmux open <worktree>
-           workmux run  <worktree> -- <agent> --resume --continue
+           workmux run  <worktree> -- <agent> --resume --continue ["continue if not completed"]
 ```
 
 1. **Scan** – finds every `*.yml` file in `~/.config/tmuxinator/` (skipping the built-in `--help.yml`).
 2. **Resolve** – reads the `root:` key from each config and expands `~`.
 3. **List** – runs `workmux list` inside that root to discover existing worktrees.
 4. **Open** – calls `workmux open <name> --new` for each worktree (creates it with `workmux add` if it doesn't exist yet).
-5. *(run only)* **Resume** – detects the configured agent and appends the correct resume flags, then delivers the command via `workmux run <name>`.
+5. *(run only)* **Resume** – detects the configured agent and appends the correct resume flags (and optionally a continuation prompt with `--resume`), then delivers the command via `workmux run <name>`.
 
 ---
 
@@ -96,10 +96,11 @@ inputs.workmuxinator.url = "github:lcensies/workmuxinator";
 ## Usage
 
 ```
-workmuxinator          Open workmux worktrees for all tmuxinator projects
-workmuxinator run      Open worktrees and resume the AI agent in each
-workmuxinator version  Print version
-workmuxinator help     Print help
+workmuxinator               Open workmux worktrees for all tmuxinator projects
+workmuxinator run           Open worktrees and resume the AI agent in each
+workmuxinator run --resume  Same, plus send "continue if not completed" prompt
+workmuxinator version       Print version
+workmuxinator help          Print help
 ```
 
 ### `workmuxinator`
@@ -114,9 +115,25 @@ Same as the default command, but after opening each worktree it also resumes
 the last agent session inside it:
 
 ```
-claude   →  claude --resume --continue
-aider    →  aider   (resumes via .aider.chat.history.md automatically)
-custom   →  <agent>  (no extra flags; configure via .workmux.yaml)
+claude         →  claude --resume --continue
+opencode       →  opencode --continue
+cursor-agent   →  cursor-agent   (pass prompt directly as positional argument)
+aider          →  aider   (resumes via .aider.chat.history.md automatically)
+custom         →  <agent>  (no extra flags; configure via .workmux.yaml)
+```
+
+### `workmuxinator run --resume`
+
+Same as `run`, but also sends a continuation prompt to each agent after
+resuming. This tells in-progress agents to keep going without waiting for
+manual input:
+
+```
+claude         →  claude --resume --continue "continue if not completed"
+opencode       →  opencode --continue --prompt "continue if not completed"
+cursor-agent   →  cursor-agent "continue if not completed"
+aider          →  aider   (prompt not applicable; still resumes via history)
+custom         →  <agent>  (no prompt; no extra flags)
 ```
 
 ---
@@ -181,6 +198,10 @@ workmux add fix/rate-limiting
 workmuxinator run
 # → opens feature/auth and fix/rate-limiting windows for myapi
 # → runs `claude --resume --continue` in each
+
+# Or, to also nudge in-progress agents to keep going:
+workmuxinator run --resume
+# → runs `claude --resume --continue "continue if not completed"` in each
 ```
 
 ---

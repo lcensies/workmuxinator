@@ -4,6 +4,8 @@
 # Usage:
 #   workmuxinator          Open existing worktrees for all tmuxinator projects
 #   workmuxinator run      Same, plus resume the configured AI agent in each worktree
+#   workmuxinator add DIR  Add a directory as a tmuxinator project
+#   workmuxinator rm DIR   Remove a directory's tmuxinator project config
 #   workmuxinator help     Show usage
 #   workmuxinator version  Show version
 
@@ -12,7 +14,7 @@ set -euo pipefail
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_NAME="workmuxinator"
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly TMUXINATOR_CONFIG_DIR="${TMUXINATOR_CONFIG_DIR:-${HOME}/.config/tmuxinator}"
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -91,6 +93,25 @@ tmuxinator_root() {
     printf '%s' "$root"
 }
 
+# ─── tmux session helpers ─────────────────────────────────────────────────────
+
+# ensure_project_session NAME ROOT  – create a detached tmux session if absent.
+ensure_project_session() {
+    local name="$1" root="$2"
+    if tmux has-session -t "$name" 2>/dev/null; then
+        log_info "  session '$name' already exists"
+    else
+        tmux new-session -d -s "$name" -c "$root"
+        log_info "  created session: $name"
+    fi
+}
+
+# run_in_session SESSION CMD  – send CMD to the first window of SESSION and execute it.
+run_in_session() {
+    local session="$1" cmd="$2"
+    tmux send-keys -t "$session" "$cmd" Enter
+}
+
 # ─── workmux helpers ──────────────────────────────────────────────────────────
 
 # workmux_agent DIR  – read agent from .workmux.yaml, fall back to global config.
@@ -116,9 +137,11 @@ agent_resume_flags() {
     local base
     base=$(basename "$agent")
     case "$base" in
-        claude*)  printf '%s' "--resume --continue" ;;
-        aider*)   printf '%s' "" ;;  # aider auto-resumes via .aider.chat.history.md
-        *)        printf '%s' "" ;;
+        claude*)        printf '%s' "--resume --continue" ;;
+        opencode*)      printf '%s' "--continue" ;;
+        cursor-agent*)  printf '%s' "" ;;  # no resume flags; pass prompt directly
+        aider*)         printf '%s' "" ;;  # aider auto-resumes via .aider.chat.history.md
+        *)              printf '%s' "" ;;
     esac
 }
 
@@ -128,35 +151,67 @@ list_worktrees() {
         | awk 'NR>1 && $1 != "" && $1 != "BRANCH" {print $1}'
 }
 
-# open_worktree NAME  – open an existing worktree, create it if absent.
-open_worktree() {
-    local name="$1"
-    log_info "  opening worktree: $name"
-    if workmux open "$name" --new 2>/dev/null; then
-        return 0
-    fi
-    # Worktree doesn't exist yet – create it in the background
-    log_info "  worktree '$name' not found, creating..."
-    workmux add "$name" --background
+# worktree_open_cmd NAME  – shell snippet to open (or create) a worktree.
+worktree_open_cmd() {
+    local name
+    name=$(printf '%q' "$1")
+    printf 'workmux open %s --new 2>/dev/null || workmux add %s --background' "$name" "$name"
 }
 
-# resume_agent NAME AGENT  – send the agent resume command into the worktree's pane.
-resume_agent_in_worktree() {
-    local name="$1" agent="$2"
+# agent_resume_prompt AGENT  – print the prompt text to send when resuming.
+agent_resume_prompt() {
+    local agent="$1"
+    local base
+    base=$(basename "$agent")
+    case "$base" in
+        claude*)        printf '%s' "continue if not completed" ;;
+        opencode*)      printf '%s' "continue if not completed" ;;
+        cursor-agent*)  printf '%s' "continue if not completed" ;;
+        *)              printf '%s' "" ;;
+    esac
+}
+
+# agent_prompt_flag AGENT  – print the flag used to pass a prompt, if any.
+# Empty string means pass the prompt as a bare positional argument.
+agent_prompt_flag() {
+    local agent="$1"
+    local base
+    base=$(basename "$agent")
+    case "$base" in
+        opencode*)  printf '%s' "--prompt" ;;
+        *)          printf '%s' "" ;;
+    esac
+}
+
+# worktree_run_cmd NAME AGENT DO_RESUME  – shell snippet to resume the agent in a worktree.
+worktree_run_cmd() {
+    local name="$1" agent="$2" do_resume="${3:-false}"
     local flags
     flags=$(agent_resume_flags "$agent")
     local full_cmd="${agent}${flags:+ $flags}"
-    log_info "  resuming agent in '$name': $full_cmd"
-    workmux run "$name" -- bash -lc "$full_cmd"
+    if [[ "$do_resume" == "true" ]]; then
+        local prompt prompt_flag
+        prompt=$(agent_resume_prompt "$agent")
+        prompt_flag=$(agent_prompt_flag "$agent")
+        if [[ -n "$prompt" ]]; then
+            if [[ -n "$prompt_flag" ]]; then
+                full_cmd+=" $prompt_flag $(printf '%q' "$prompt")"
+            else
+                full_cmd+=" $(printf '%q' "$prompt")"
+            fi
+        fi
+    fi
+    printf 'workmux run %s -- bash -lc %s' "$(printf '%q' "$name")" "$(printf '%q' "$full_cmd")"
 }
 
 # ─── Core logic ───────────────────────────────────────────────────────────────
 
-# process_project CONFIG DO_RUN  – open (and optionally run agent for) all worktrees
+# process_project CONFIG DO_RUN DO_RESUME  – open (and optionally run agent for) all worktrees
 # in a single tmuxinator project.
 process_project() {
     local config="$1"
     local do_run="${2:-false}"
+    local do_resume="${3:-false}"
     local project_name
     project_name=$(basename "$config" .yml)
 
@@ -169,6 +224,8 @@ process_project() {
     fi
 
     log_info "Project: $project_name  (root: $root)"
+
+    ensure_project_session "$project_name" "$root"
 
     pushd "$root" > /dev/null || { log_warn "Cannot cd to $root"; return 0; }
 
@@ -184,22 +241,29 @@ process_project() {
         return 0
     fi
 
+    # Build a single compound command and send it into the project's own session.
+    # Using ; rather than && so a single failed open doesn't abort the rest.
+    local cmds="cd $(printf '%q' "$root")"
     while IFS= read -r wt; do
         [[ -z "$wt" ]] && continue
-        open_worktree "$wt"
+        log_info "  queueing worktree: $wt"
+        cmds+="; $(worktree_open_cmd "$wt")"
         if [[ "$do_run" == "true" ]]; then
-            resume_agent_in_worktree "$wt" "$agent"
+            cmds+="; $(worktree_run_cmd "$wt" "$agent" "$do_resume")"
         fi
     done <<< "$worktrees"
+
+    run_in_session "$project_name" "$cmds"
 
     popd > /dev/null
 }
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
-# cmd_launch DO_RUN  – iterate all tmuxinator projects and process each.
+# cmd_launch DO_RUN DO_RESUME  – iterate all tmuxinator projects and process each.
 cmd_launch() {
     local do_run="${1:-false}"
+    local do_resume="${2:-false}"
 
     if [[ ! -d "$TMUXINATOR_CONFIG_DIR" ]]; then
         die "tmuxinator config directory not found: $TMUXINATOR_CONFIG_DIR"
@@ -214,12 +278,91 @@ cmd_launch() {
 
     while IFS= read -r config; do
         [[ -z "$config" ]] && continue
-        process_project "$config" "$do_run"
+        process_project "$config" "$do_run" "$do_resume"
     done <<< "$configs"
 }
 
 cmd_run() {
-    cmd_launch "true"
+    local do_resume="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resume) do_resume="true" ;;
+            *) die "Unknown option for run: '$1'" ;;
+        esac
+        shift
+    done
+    cmd_launch "true" "$do_resume"
+}
+
+# cmd_add DIR  – create a minimal tmuxinator config for the given directory.
+cmd_add() {
+    local dir="${1:-}"
+    [[ -z "$dir" ]] && die "Usage: $SCRIPT_NAME add <dir>"
+
+    # Resolve to absolute path
+    dir=$(realpath "$dir" 2>/dev/null) || die "Cannot resolve path: $dir"
+    [[ -d "$dir" ]] || die "Not a directory: $dir"
+
+    local name
+    name=$(basename "$dir")
+    local config="$TMUXINATOR_CONFIG_DIR/${name}.yml"
+
+    if [[ -f "$config" ]]; then
+        die "Config already exists: $config"
+    fi
+
+    mkdir -p "$TMUXINATOR_CONFIG_DIR"
+
+    cat > "$config" <<YAML
+name: ${name}
+root: ${dir}
+
+windows:
+  - editor:
+YAML
+
+    log_info "Created tmuxinator config: $config"
+}
+
+# cmd_rm DIR  – remove the tmuxinator config whose root matches the given directory.
+cmd_rm() {
+    local dir="${1:-}"
+    [[ -z "$dir" ]] && die "Usage: $SCRIPT_NAME rm <dir>"
+
+    dir=$(realpath "$dir" 2>/dev/null) || die "Cannot resolve path: $dir"
+
+    local configs
+    configs=$(list_tmuxinator_configs)
+
+    if [[ -z "$configs" ]]; then
+        die "No tmuxinator configs found in $TMUXINATOR_CONFIG_DIR"
+    fi
+
+    local matched=""
+    while IFS= read -r config; do
+        [[ -z "$config" ]] && continue
+        local root
+        root=$(tmuxinator_root "$config")
+        # Expand ~ just in case yaml_get didn't
+        root="${root/#\~/$HOME}"
+        if [[ "$root" == "$dir" ]]; then
+            matched="$config"
+            break
+        fi
+    done <<< "$configs"
+
+    if [[ -z "$matched" ]]; then
+        # Fall back: match by name (basename of dir)
+        local name
+        name=$(basename "$dir")
+        local candidate="$TMUXINATOR_CONFIG_DIR/${name}.yml"
+        [[ -f "$candidate" ]] && matched="$candidate"
+    fi
+
+    [[ -z "$matched" ]] && die "No tmuxinator config found for: $dir"
+
+    rm "$matched"
+    log_info "Removed tmuxinator config: $matched"
 }
 
 cmd_version() {
@@ -232,7 +375,11 @@ Usage: $SCRIPT_NAME [COMMAND]
 
 Commands:
   (none)    Open workmux worktrees for all tmuxinator projects
-  run       Open worktrees and resume the configured AI agent in each
+  run [--resume]
+            Open worktrees and resume the configured AI agent in each;
+            with --resume, also send "continue if not completed" prompt
+  add DIR   Create a tmuxinator config for DIR (uses directory basename as name)
+  rm DIR    Remove the tmuxinator config whose root is DIR
   version   Print version ($VERSION)
   help      Print this help
 
@@ -241,9 +388,11 @@ Environment:
                           (default: ~/.config/tmuxinator)
 
 Agent resume flags (detected by agent base name):
-  claude*   --resume --continue
-  aider*    (auto-resumes via history)
-  other     (none)
+  claude*        --resume --continue [+ "continue if not completed" with --resume]
+  opencode*      --continue          [+ --prompt "continue if not completed" with --resume]
+  cursor-agent*  (no resume flags)   [+ "continue if not completed" with --resume]
+  aider*         (auto-resumes via history)
+  other          (none)
 
 workmux agent config precedence:
   1. <project-root>/.workmux.yaml  agent:
@@ -261,7 +410,9 @@ main() {
     shift || true
 
     case "$cmd" in
-        run)             cmd_run ;;
+        run)             cmd_run "$@" ;;
+        add)             cmd_add "$@" ;;
+        rm)              cmd_rm "$@" ;;
         version|-V|--version) cmd_version ;;
         help|-h|--help)  cmd_help ;;
         "")              cmd_launch "false" ;;
