@@ -99,6 +99,8 @@ inputs.workmuxinator.url = "github:lcensies/workmuxinator";
 workmuxinator               Open workmux worktrees for all tmuxinator projects
 workmuxinator run           Open worktrees and resume the AI agent in each
 workmuxinator run --resume  Same, plus send "continue if not completed" prompt
+workmuxinator add DIR       Register a directory as a tmuxinator project
+workmuxinator rm DIR        Remove a directory's tmuxinator project config
 workmuxinator version       Print version
 workmuxinator help          Print help
 ```
@@ -138,7 +140,32 @@ custom         →  <agent>  (no prompt; no extra flags)
 
 ---
 
-## Configuration
+### `workmuxinator add DIR`
+
+Creates a minimal tmuxinator config for the given directory, using its
+basename as the project name:
+
+```bash
+workmuxinator add ~/projects/myapi
+# → creates ~/.config/tmuxinator/myapi.yml
+```
+
+The generated config sets `root:` to the resolved absolute path. You can
+edit the file afterwards to add windows or other tmuxinator options.
+
+Fails if a config with that name already exists.
+
+### `workmuxinator rm DIR`
+
+Removes the tmuxinator config whose `root:` matches the given directory.
+Falls back to matching by the directory's basename if no root match is found.
+
+```bash
+workmuxinator rm ~/projects/myapi
+# → removes ~/.config/tmuxinator/myapi.yml
+```
+
+---
 
 ### tmuxinator project config
 
