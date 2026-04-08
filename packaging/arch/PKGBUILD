@@ -1,0 +1,17 @@
+# Maintainer: workmuxinator contributors
+pkgname=workmuxinator
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Launch workmux worktrees for all tmuxinator projects"
+arch=('any')
+url="https://github.com/lcensies/workmuxinator"
+license=('MIT')
+depends=('tmux' 'tmuxinator')
+optdepends=('yq: recommended for robust YAML parsing')
+source=("$pkgname-$pkgver::git+$url.git")
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 "$srcdir/$pkgname-$pkgver/bin/workmuxinator" \
+        "$pkgdir/usr/local/bin/workmuxinator"
+}

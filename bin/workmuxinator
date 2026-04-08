@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# workmuxinator – launch workmux worktrees for every tmuxinator project
+#
+# Usage:
+#   workmuxinator          Open existing worktrees for all tmuxinator projects
+#   workmuxinator run      Same, plus resume the configured AI agent in each worktree
+#   workmuxinator help     Show usage
+#   workmuxinator version  Show version
+
+set -euo pipefail
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+readonly SCRIPT_NAME="workmuxinator"
+readonly VERSION="0.1.0"
+readonly TMUXINATOR_CONFIG_DIR="${TMUXINATOR_CONFIG_DIR:-${HOME}/.config/tmuxinator}"
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+log_info()  { printf '[%s] \033[32mINFO\033[0m  %s\n' "$SCRIPT_NAME" "$*" >&2; }
+log_warn()  { printf '[%s] \033[33mWARN\033[0m  %s\n' "$SCRIPT_NAME" "$*" >&2; }
+log_error() { printf '[%s] \033[31mERROR\033[0m %s\n' "$SCRIPT_NAME" "$*" >&2; }
+die()       { log_error "$*"; exit 1; }
+
+# ─── Dependency checks ────────────────────────────────────────────────────────
+
+require_cmd() {
+    command -v "$1" &>/dev/null || die "Required command not found: $1"
+}
+
+check_deps() {
+    require_cmd tmuxinator
+    require_cmd workmux
+    require_cmd tmux
+    if ! command -v yq &>/dev/null; then
+        log_warn "yq not found; using basic YAML parser (install yq for best results)"
+    fi
+}
+
+# ─── YAML parsing ─────────────────────────────────────────────────────────────
+
+# yaml_get FILE KEY  – read a top-level scalar from a YAML file.
+# Prefers yq; falls back to sed/grep for simple "key: value" lines.
+yaml_get() {
+    local file="$1" key="$2"
+    if command -v yq &>/dev/null; then
+        yq -r ".$key // empty" "$file" 2>/dev/null
+    else
+        grep -E "^[[:space:]]*${key}[[:space:]]*:" "$file" 2>/dev/null \
+            | head -1 \
+            | sed -E "s/^[[:space:]]*${key}[[:space:]]*:[[:space:]]*//" \
+            | tr -d '"'"'"
+    fi
+}
+
+# tmuxinator_windows CONFIG  – print one window name per line.
+tmuxinator_windows() {
+    local config="$1"
+    if command -v yq &>/dev/null; then
+        yq -r '.windows[] | if type == "object" then keys[] else . end' "$config" 2>/dev/null
+    else
+        awk '/^windows:/{found=1; next}
+             found && /^  - /{
+                 line=$0
+                 gsub(/^[[:space:]]*-[[:space:]]*/,"",line)
+                 gsub(/:.*$/,"",line)
+                 gsub(/^[[:space:]]+|[[:space:]]+$/,"",line)
+                 if (line != "") print line
+             }
+             found && /^[^ ]/{found=0}' "$config"
+    fi
+}
+
+# ─── tmuxinator helpers ───────────────────────────────────────────────────────
+
+# list_tmuxinator_configs  – print paths of all real project configs.
+list_tmuxinator_configs() {
+    find "$TMUXINATOR_CONFIG_DIR" -maxdepth 1 -name '*.yml' \
+        ! -name '--help.yml' \
+        2>/dev/null \
+        | sort
+}
+
+# tmuxinator_root CONFIG  – resolve the project root directory.
+tmuxinator_root() {
+    local config="$1"
+    local root
+    root=$(yaml_get "$config" "root")
+    # Expand leading ~
+    root="${root/#\~/$HOME}"
+    printf '%s' "$root"
+}
+
+# ─── workmux helpers ──────────────────────────────────────────────────────────
+
+# workmux_agent DIR  – read agent from .workmux.yaml, fall back to global config.
+workmux_agent() {
+    local dir="${1:-$PWD}"
+    local local_cfg="$dir/.workmux.yaml"
+    local global_cfg="${HOME}/.config/workmux/config.yaml"
+    local agent=""
+
+    if [[ -f "$local_cfg" ]]; then
+        agent=$(yaml_get "$local_cfg" "agent")
+    fi
+    if [[ -z "$agent" ]] && [[ -f "$global_cfg" ]]; then
+        agent=$(yaml_get "$global_cfg" "agent")
+    fi
+    printf '%s' "${agent:-claude}"
+}
+
+# agent_resume_flags AGENT  – print the flags needed to resume the last session.
+agent_resume_flags() {
+    local agent="$1"
+    # Strip path prefix, keep base name for matching
+    local base
+    base=$(basename "$agent")
+    case "$base" in
+        claude*)  printf '%s' "--resume --continue" ;;
+        aider*)   printf '%s' "" ;;  # aider auto-resumes via .aider.chat.history.md
+        *)        printf '%s' "" ;;
+    esac
+}
+
+# list_worktrees  – print worktree names for the project in $PWD (one per line).
+list_worktrees() {
+    workmux list 2>/dev/null \
+        | awk 'NR>1 && $1 != "" && $1 != "BRANCH" {print $1}'
+}
+
+# open_worktree NAME  – open an existing worktree, create it if absent.
+open_worktree() {
+    local name="$1"
+    log_info "  opening worktree: $name"
+    if workmux open "$name" --new 2>/dev/null; then
+        return 0
+    fi
+    # Worktree doesn't exist yet – create it in the background
+    log_info "  worktree '$name' not found, creating..."
+    workmux add "$name" --background
+}
+
+# resume_agent NAME AGENT  – send the agent resume command into the worktree's pane.
+resume_agent_in_worktree() {
+    local name="$1" agent="$2"
+    local flags
+    flags=$(agent_resume_flags "$agent")
+    local full_cmd="${agent}${flags:+ $flags}"
+    log_info "  resuming agent in '$name': $full_cmd"
+    workmux run "$name" -- bash -lc "$full_cmd"
+}
+
+# ─── Core logic ───────────────────────────────────────────────────────────────
+
+# process_project CONFIG DO_RUN  – open (and optionally run agent for) all worktrees
+# in a single tmuxinator project.
+process_project() {
+    local config="$1"
+    local do_run="${2:-false}"
+    local project_name
+    project_name=$(basename "$config" .yml)
+
+    local root
+    root=$(tmuxinator_root "$config")
+
+    if [[ -z "$root" ]] || [[ ! -d "$root" ]]; then
+        log_warn "Skipping '$project_name': root '${root:-<unset>}' not found"
+        return 0
+    fi
+
+    log_info "Project: $project_name  (root: $root)"
+
+    pushd "$root" > /dev/null || { log_warn "Cannot cd to $root"; return 0; }
+
+    local agent
+    agent=$(workmux_agent "$root")
+
+    local worktrees
+    worktrees=$(list_worktrees) || true
+
+    if [[ -z "$worktrees" ]]; then
+        log_warn "  no worktrees found for '$project_name' – skipping"
+        popd > /dev/null
+        return 0
+    fi
+
+    while IFS= read -r wt; do
+        [[ -z "$wt" ]] && continue
+        open_worktree "$wt"
+        if [[ "$do_run" == "true" ]]; then
+            resume_agent_in_worktree "$wt" "$agent"
+        fi
+    done <<< "$worktrees"
+
+    popd > /dev/null
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+# cmd_launch DO_RUN  – iterate all tmuxinator projects and process each.
+cmd_launch() {
+    local do_run="${1:-false}"
+
+    if [[ ! -d "$TMUXINATOR_CONFIG_DIR" ]]; then
+        die "tmuxinator config directory not found: $TMUXINATOR_CONFIG_DIR"
+    fi
+
+    local configs
+    configs=$(list_tmuxinator_configs)
+
+    if [[ -z "$configs" ]]; then
+        die "No tmuxinator project configs found in $TMUXINATOR_CONFIG_DIR"
+    fi
+
+    while IFS= read -r config; do
+        [[ -z "$config" ]] && continue
+        process_project "$config" "$do_run"
+    done <<< "$configs"
+}
+
+cmd_run() {
+    cmd_launch "true"
+}
+
+cmd_version() {
+    printf '%s %s\n' "$SCRIPT_NAME" "$VERSION"
+}
+
+cmd_help() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [COMMAND]
+
+Commands:
+  (none)    Open workmux worktrees for all tmuxinator projects
+  run       Open worktrees and resume the configured AI agent in each
+  version   Print version ($VERSION)
+  help      Print this help
+
+Environment:
+  TMUXINATOR_CONFIG_DIR   tmuxinator config directory
+                          (default: ~/.config/tmuxinator)
+
+Agent resume flags (detected by agent base name):
+  claude*   --resume --continue
+  aider*    (auto-resumes via history)
+  other     (none)
+
+workmux agent config precedence:
+  1. <project-root>/.workmux.yaml  agent:
+  2. ~/.config/workmux/config.yaml agent:
+  3. Fallback: claude
+EOF
+}
+
+# ─── Entry point ──────────────────────────────────────────────────────────────
+
+main() {
+    check_deps
+
+    local cmd="${1:-}"
+    shift || true
+
+    case "$cmd" in
+        run)             cmd_run ;;
+        version|-V|--version) cmd_version ;;
+        help|-h|--help)  cmd_help ;;
+        "")              cmd_launch "false" ;;
+        *)               die "Unknown command: '$cmd'. Run '$SCRIPT_NAME help'." ;;
+    esac
+}
+
+main "$@"
