@@ -106,10 +106,32 @@ ensure_project_session() {
     fi
 }
 
+# tmux_first_pane SESSION  – print "SESSION:WIN.PANE" for the first window's first pane.
+# Uses lowest window/pane indices so we respect tmux base-index / pane-base-index (often 1).
+# Sending to SESSION alone targets the *active* window, which breaks after workmux switches
+# focus to a worktree window — commands must always go to the original shell pane.
+tmux_first_pane() {
+    local session="$1"
+    local win pane
+    win=$(tmux list-windows -t "$session" -F '#{window_index}' 2>/dev/null | sort -n | head -1)
+    [[ -n "$win" ]] || return 1
+    pane=$(tmux list-panes -t "$session:$win" -F '#{pane_index}' 2>/dev/null | sort -n | head -1)
+    [[ -n "$pane" ]] || return 1
+    printf '%s:%s.%s' "$session" "$win" "$pane"
+}
+
 # run_in_session SESSION CMD  – send CMD to the first window of SESSION and execute it.
 run_in_session() {
     local session="$1" cmd="$2"
-    tmux send-keys -t "$session" "$cmd" Enter
+    local target
+    target=$(tmux_first_pane "$session") || {
+        log_error "Cannot resolve a pane in session '$session' (does it exist?)"
+        return 1
+    }
+    # -l: literal text (avoids tmux key-name parsing); target is always the bootstrap shell pane.
+    # Enter must be a separate send-keys: with -l, a trailing Enter would type the letters E-n-t-e-r.
+    tmux send-keys -l -t "$target" "$cmd"
+    tmux send-keys -t "$target" Enter
 }
 
 # ─── workmux helpers ──────────────────────────────────────────────────────────
