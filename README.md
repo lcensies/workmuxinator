@@ -1,250 +1,141 @@
 # workmuxinator
 
-**workmuxinator** is a small bash wrapper that bridges [tmuxinator](https://github.com/tmuxinator/tmuxinator) and [workmux](https://github.com/cablehead/workmux). It reads your tmuxinator project configs, finds every project's root, and opens the existing workmux worktrees there—optionally resuming your AI coding agent (Claude Code, aider, …) in each one.
+Minimal workflow runner in Go.
 
-Think of it as an "open everything" button for your multi-project, multi-agent workflow.
+`workmuxinator` executes DAG workflows from YAML and can run:
 
----
+- AI nodes (`prompt` or `prompt_file`)
+- deterministic shell nodes (`bash`)
+- loop nodes with stop conditions (`ALL_TASKS_COMPLETE`, `APPROVED`)
+- explicit failure fallback edges (`on_failure`)
 
-## How it works
+It is intentionally small so you can plug any coding agent and define your own orchestration flow.
 
-```
-tmuxinator configs          workmux per-project config
-~/.config/tmuxinator/       .workmux.yaml / ~/.config/workmux/config.yaml
-        │                               │
-        ▼                               ▼
-  project root            which agent? claude / aider / …
-  list of windows                       │
-        │                               │ (resume flags)
-        └──────────┬────────────────────┘
-                   ▼
-           workmux open <worktree>
-           workmux run  <worktree> -- <agent> --resume --continue ["continue if not completed"]
-```
+Legacy compatibility is also built in: tmuxinator/workmux launch, resume, add, and rm commands are preserved.
 
-1. **Scan** – finds every `*.yml` file in `~/.config/tmuxinator/` (skipping the built-in `--help.yml`).
-2. **Resolve** – reads the `root:` key from each config and expands `~`.
-3. **List** – runs `workmux list` inside that root to discover existing worktrees.
-4. **Open** – calls `workmux open <name> --new` for each worktree (creates it with `workmux add` if it doesn't exist yet).
-5. *(run only)* **Resume** – detects the configured agent and appends the correct resume flags (and optionally a continuation prompt with `--resume`), then delivers the command via `workmux run <name>`.
+## Goals
 
----
+- Agent-agnostic: use Codex, Claude, Aider, Cursor agent, or custom commands.
+- DAG-first: express dependencies with `depends_on`.
+- Prompt-as-file: keep prompts in plain text files.
+- Human gates: interactive approval loops.
+- Failure routing: fallback node per step (`on_failure`).
 
-## Installation
-
-### Quick (any distro)
+## Install
 
 ```bash
 git clone https://github.com/lcensies/workmuxinator
 cd workmuxinator
-sudo make install          # installs to /usr/local/bin
+make build
+sudo make install
 ```
 
-Override the prefix:
+## Quick start
 
-```bash
-make install PREFIX=~/.local
-```
-
-### Debian / Ubuntu
-
-```bash
-make deb
-sudo dpkg -i workmuxinator_0.1.0_all.deb
-```
-
-### Fedora / RHEL / openSUSE
-
-```bash
-make rpm
-sudo rpm -i ~/rpmbuild/RPMS/noarch/workmuxinator-0.1.0-1.noarch.rpm
-```
-
-### Arch Linux
-
-```bash
-cd packaging/arch
-makepkg -si
-```
-
-### Nix / NixOS
-
-```bash
-# Run without installing
-nix run github:lcensies/workmuxinator
-
-# Install into profile
-nix profile install github:lcensies/workmuxinator
-
-# Use in a flake
-inputs.workmuxinator.url = "github:lcensies/workmuxinator";
-```
-
----
-
-## Requirements
-
-| Tool | Role | Notes |
-|------|------|-------|
-| `tmux` | Terminal multiplexer | Required |
-| `tmuxinator` | Project config source | Required |
-| `workmux` | Worktree / agent orchestrator | Required |
-| `yq` (Go) | Robust YAML parsing | Recommended – falls back to `awk`/`sed` without it |
-
----
-
-## Usage
-
-```
-workmuxinator               Open workmux worktrees for all tmuxinator projects
-workmuxinator run           Open worktrees and resume the AI agent in each
-workmuxinator run --resume  Same, plus send "continue if not completed" prompt
-workmuxinator add DIR       Register a directory as a tmuxinator project
-workmuxinator rm DIR        Remove a directory's tmuxinator project config
-workmuxinator version       Print version
-workmuxinator help          Print help
-```
-
-### `workmuxinator`
-
-Iterates every tmuxinator project config, enters its root directory, and opens
-all existing workmux worktrees in new tmux windows. Worktrees that don't exist
-yet are created with `workmux add --background`.
-
-### `workmuxinator run`
-
-Same as the default command, but after opening each worktree it also resumes
-the last agent session inside it:
-
-```
-claude         →  claude --resume --continue
-opencode       →  opencode --continue
-cursor-agent   →  cursor-agent   (pass prompt directly as positional argument)
-aider          →  aider   (resumes via .aider.chat.history.md automatically)
-custom         →  <agent>  (no extra flags; configure via .workmux.yaml)
-```
-
-### `workmuxinator run --resume`
-
-Same as `run`, but also sends a continuation prompt to each agent after
-resuming. This tells in-progress agents to keep going without waiting for
-manual input:
-
-```
-claude         →  claude --resume --continue "continue if not completed"
-opencode       →  opencode --continue --prompt "continue if not completed"
-cursor-agent   →  cursor-agent "continue if not completed"
-aider          →  aider   (prompt not applicable; still resumes via history)
-custom         →  <agent>  (no prompt; no extra flags)
-```
-
----
-
-### `workmuxinator add DIR`
-
-Creates a minimal tmuxinator config for the given directory, using its
-basename as the project name:
-
-```bash
-workmuxinator add ~/projects/myapi
-# → creates ~/.config/tmuxinator/myapi.yml
-```
-
-The generated config sets `root:` to the resolved absolute path. You can
-edit the file afterwards to add windows or other tmuxinator options.
-
-Fails if a config with that name already exists.
-
-### `workmuxinator rm DIR`
-
-Removes the tmuxinator config whose `root:` matches the given directory.
-Falls back to matching by the directory's basename if no root match is found.
-
-```bash
-workmuxinator rm ~/projects/myapi
-# → removes ~/.config/tmuxinator/myapi.yml
-```
-
----
-
-### tmuxinator project config
-
-workmuxinator only needs the `root:` field from your tmuxinator YAML:
+1. Configure agent command in `.workmuxinator/agent.yaml`:
 
 ```yaml
-# ~/.config/tmuxinator/myproject.yml
-name: myproject
-root: ~/projects/myproject
-
-windows:
-  - editor: vim
-  - tests: pytest --watch
+command: codex
+args: []
+prompt_flag: ""
+fresh_context_arg: ""
 ```
 
-The `windows:` section is parsed but currently used informally—workmux itself
-manages window creation. The key field is `root:`.
-
-### workmux agent config
-
-workmuxinator reads the `agent:` key from:
-
-1. `<project-root>/.workmux.yaml`
-2. `~/.config/workmux/config.yaml`
-3. Fallback: `claude`
-
-Example `.workmux.yaml`:
-
-```yaml
-agent: claude
-# or:
-# agent: aider
-# agent: /usr/local/bin/my-agent
-```
-
-### Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TMUXINATOR_CONFIG_DIR` | `~/.config/tmuxinator` | Where tmuxinator project YAMLs live |
-
----
-
-## Example workflow
+2. Run the sample workflow:
 
 ```bash
-# 1. Create a tmuxinator project for each repo you work on
-tmuxinator new myapi
-tmuxinator new frontend
-
-# 2. Create some workmux worktrees in those repos
-cd ~/projects/myapi
-workmux add feature/auth
-workmux add fix/rate-limiting
-
-# 3. Next morning: restore everything and resume agents
-workmuxinator run
-# → opens feature/auth and fix/rate-limiting windows for myapi
-# → runs `claude --resume --continue` in each
-
-# Or, to also nudge in-progress agents to keep going:
-workmuxinator run --resume
-# → runs `claude --resume --continue "continue if not completed"` in each
+workmuxinator run -f .workmuxinator/workflows/build-feature.yaml
 ```
 
----
+3. Validate workflow schema:
 
-## Project layout
+```bash
+workmuxinator validate -f .workmuxinator/workflows/build-feature.yaml
+```
 
+## Workflow format
+
+```yaml
+nodes:
+  - id: plan
+    prompt_file: ../prompts/plan.txt
+
+  - id: implement
+    depends_on: [plan]
+    loop:
+      prompt_file: ../prompts/implement.txt
+      until: ALL_TASKS_COMPLETE
+      fresh_context: true
+      max_iterations: 10
+    on_failure: rollback
+
+  - id: run-tests
+    depends_on: [implement]
+    bash: bun run validate
+    on_failure: rollback
+
+  - id: approve
+    depends_on: [run-tests]
+    loop:
+      prompt_file: ../prompts/approve.txt
+      until: APPROVED
+      interactive: true
+      max_iterations: 20
+
+  - id: rollback
+    prompt_file: ../prompts/rollback.txt
 ```
-bin/workmuxinator          Main script
-Makefile                   install / packaging targets
-flake.nix                  Nix flake
-packaging/
-  debian/control           dpkg-deb metadata
-  rpm/workmuxinator.spec   rpmbuild spec
-  arch/PKGBUILD            Arch makepkg
-.github/workflows/
-  release.yml              Build & attach packages on GitHub release
-tmuxinator/
-  workmuxinator.yml        tmuxinator config for this repo (for testing)
+
+### Node keys
+
+- `id`: unique node name.
+- `depends_on`: list of prerequisite nodes.
+- `prompt`: inline AI prompt.
+- `prompt_file`: path to prompt text file (relative to workflow file).
+- `bash`: deterministic shell command.
+- `loop`: iterative AI execution.
+- `on_failure`: node to execute when this node fails.
+
+### Loop keys
+
+- `prompt` or `prompt_file`: required.
+- `until`: `ALL_TASKS_COMPLETE` or `APPROVED`.
+- `fresh_context`: appends agent-specific fresh-context arg if configured.
+- `interactive`: prompts for human `y/N` confirmation each iteration.
+- `max_iterations`: safety cap (default `8`).
+
+## CLI
+
+```bash
+workmuxinator                      # legacy open all projects
+workmuxinator open                 # legacy open all projects
+workmuxinator run --resume         # legacy resume mode
+workmuxinator add <dir>            # legacy add tmuxinator config
+workmuxinator rm <dir>             # legacy remove tmuxinator config
+
+workmuxinator workflow run [flags]
+workmuxinator run -f ...           # workflow shortcut
+workmuxinator workflow validate [flags]
+workmuxinator validate [flags]     # workflow shortcut
+workmuxinator version
+workmuxinator help
 ```
+
+Workflow run flags:
+
+- `-f`: workflow path (default `.workmuxinator/workflows/build-feature.yaml`)
+- `--agent`: override agent command
+- `--prompt-flag`: override prompt flag for agent
+- `--fresh-context-arg`: override fresh context arg
+- `--dry-run`: print execution plan without commands
+
+Built-in workflow agent defaults:
+
+- `opencode`: uses `--prompt` automatically unless `prompt_flag` is explicitly configured.
+- `cursor-agent`: uses positional prompts by default (no prompt flag required).
+
+## Integration notes
+
+- Orchestrator-friendly: use `bash` nodes to call tools like `workmux`, `oh-my-cursor`, CI scripts, or custom wrappers.
+- Prompt catalogs: keep shared prompt packs in `.workmuxinator/prompts/` and reference them from multiple workflows.
+- Failure control: route failed nodes into recovery nodes (`rollback`, `repair`, `retry`) via `on_failure`.

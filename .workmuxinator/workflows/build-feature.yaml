@@ -1,0 +1,39 @@
+nodes:
+  - id: plan
+    prompt_file: ../prompts/plan.txt
+    on_failure: rollback
+
+  - id: implement
+    depends_on: [plan]
+    loop:
+      prompt_file: ../prompts/implement.txt
+      until: ALL_TASKS_COMPLETE
+      fresh_context: true
+      max_iterations: 10
+    on_failure: rollback
+
+  - id: run-tests
+    depends_on: [implement]
+    bash: bun run validate
+    on_failure: review
+
+  - id: review
+    depends_on: [run-tests]
+    prompt_file: ../prompts/review.txt
+    on_failure: rollback
+
+  - id: approve
+    depends_on: [review]
+    loop:
+      prompt_file: ../prompts/approve.txt
+      until: APPROVED
+      interactive: true
+      max_iterations: 20
+    on_failure: rollback
+
+  - id: create-pr
+    depends_on: [approve]
+    prompt_file: ../prompts/create-pr.txt
+
+  - id: rollback
+    prompt_file: ../prompts/rollback.txt

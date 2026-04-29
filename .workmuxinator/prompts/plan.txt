@@ -1,0 +1,3 @@
+Explore the codebase and produce a concise implementation plan.
+List ordered tasks and validation steps.
+Reply with ALL_TASKS_COMPLETE only when the plan is complete.

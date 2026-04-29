@@ -1,5 +1,5 @@
 {
-  description = "Launch workmux worktrees for all tmuxinator projects";
+  description = "Minimal Archon-like DAG workflow runner in Go";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -11,33 +11,16 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        workmuxinator = pkgs.stdenv.mkDerivation {
+        workmuxinator = pkgs.buildGoModule {
           pname = "workmuxinator";
-          version = "0.1.0";
+          version = "0.3.0";
           src = ./.;
+          vendorHash = pkgs.lib.fakeHash;
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-
-          # Pure bash script – no build step needed
-          dontBuild = true;
-
-          installPhase = ''
-            install -Dm755 bin/workmuxinator $out/bin/workmuxinator
-          '';
-
-          # Wrap to ensure runtime deps are on PATH
-          postInstall = ''
-            wrapProgram $out/bin/workmuxinator \
-              --prefix PATH : ${pkgs.lib.makeBinPath [
-                pkgs.bash
-                pkgs.tmux
-                pkgs.yq-go
-                # workmux and tmuxinator are expected to be installed by the user
-              ]}
-          '';
+          subPackages = [ "cmd/workmuxinator" ];
 
           meta = with pkgs.lib; {
-            description = "Launch workmux worktrees for all tmuxinator projects";
+            description = "Minimal Archon-like DAG workflow runner in Go";
             license = licenses.mit;
             platforms = platforms.all;
             mainProgram = "workmuxinator";
@@ -55,10 +38,8 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pkgs.bash
-            pkgs.tmux
-            pkgs.yq-go
-            pkgs.shellcheck
+            pkgs.go
+            pkgs.gopls
           ];
         };
       }

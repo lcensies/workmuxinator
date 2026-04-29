@@ -1,0 +1,2 @@
+A workflow step failed.
+Diagnose the failure, restore a stable state, and explain what must be changed before retrying.

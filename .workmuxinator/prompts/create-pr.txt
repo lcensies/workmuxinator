@@ -1,0 +1,2 @@
+Prepare final branch state, push changes, and create a pull request.
+Include a concise summary and a concrete test plan in the PR description.

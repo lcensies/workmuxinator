@@ -1,0 +1,3 @@
+Read the latest plan and implement the next unfinished task.
+Run relevant validation commands after each change.
+When every planned task is done and validated, include ALL_TASKS_COMPLETE.

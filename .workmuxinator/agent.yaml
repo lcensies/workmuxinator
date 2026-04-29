@@ -1,0 +1,9 @@
+command: codex
+args: []
+# Known defaults:
+# - opencode: prompt_flag auto-defaults to --prompt in workflow mode
+# - cursor-agent: prompt is passed positionally by default
+# Set for agents that require an explicit prompt flag (example: --prompt).
+prompt_flag: ""
+# Optional arg to force fresh context per loop iteration (agent-specific).
+fresh_context_arg: ""
